@@ -68,6 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # 串行编译：并行时多个 job 同时打 API / 抢占资源易触发限流与偶发失败
+      max-parallel: 1
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
@@ -160,6 +162,16 @@ jobs:
           PKG_VERSION: ${{ matrix.version }}
         run: python3 scripts/fetch_sdist.py "$PKG_NAME" "$PKG_VERSION"
 
+      - name: Resolve NDK libc++ include dir
+        # libc++ 的 C 兼容转发头（stdint.h 等）必须在 -I 链里排在 bionic 头
+        # （prefix/include）之前：C++ 的 <cstdint> 由此找到自己的转发头，转发头
+        # include_next 再落到 bionic 版。直接拷贝转发头到 prefix/include 会因
+        # include_next 跳到 glibc 头（-I/usr/include）而链错（intmax_t/ldiv_t 全丢）。
+        run: |
+          CXXV1=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1)
+          echo "CXXV1=$CXXV1" >> "$GITHUB_ENV"
+          ls "$CXXV1"/stdint.h "$CXXV1"/__config
+
       - name: Build android wheel
         env:
           # sdist 解包目录名来自 PyPI 包内容（非完全受控），只允许仓库内路径
@@ -185,6 +197,8 @@ jobs:
           CIBW_ENVIRONMENT: >-
             RUSTFLAGS='-L native=/home/runner/tmx/usr/lib -l dylib=python3.14 -C link-arg=-Wl,-rpath,/data/data/com.termux/files/usr/lib'
             LIBUV_CONFIGURE_HOST='aarch64-linux-android'
+            CFLAGS='-I${{ env.CXXV1 }} $CFLAGS'
+            CXXFLAGS='-I${{ env.CXXV1 }} $CXXFLAGS'
           # repair 阶段：不跑 auditwheel（其 ldpaths 只有 NDK sysroot，找不到 Termux
           # 库会 ValueError 退出）；改为统一给所有 .so 补 RUNPATH（链接期 rpath 对
           # C 扩展会丢失）并重算 RECORD，产物依赖目标机系统库（与本机验证形态一致）。
@@ -222,22 +236,6 @@ jobs:
             BIONIC=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include)
             echo "== [inject] bionic headers from $BIONIC =="
             cp -a "$BIONIC"/. "$prefix/include/"
-            # libc++ 的 C 兼容转发头（剥掉 #include <__config>：那是 C++ 配置头，
-            # C 编译器解析不了）。bionic 头抢占 -I 首位后，libc++ 的 <cstdint>/<cstring>
-            # 找不到自己的 stdint.h 转发头 → "tried including <stdint.h> but didn't
-            # find libc++'s header"（frozenlist/greenlet/grpcio 全挂）。
-            # 转发头本体只是 include_next，剥掉 __config 后对 C/C++ 均安全。
-            CXXV1="$BIONIC/c++/v1"
-            if [ -d "$CXXV1" ]; then
-              echo "== [inject] libc++ C shims (config-stripped) from $CXXV1 =="
-              for h in stdint.h stddef.h stdlib.h string.h wchar.h wctype.h; do
-                if [ -f "$CXXV1/$h" ]; then
-                  sed -e '/#include <__config>/d' -e '/#include <__config[^>]*>/d' \
-                    "$CXXV1/$h" > "$prefix/include/$h"
-                fi
-              done
-              grep -c '__config' "$prefix/include"/stdint.h "$prefix/include"/stddef.h 2>/dev/null || true
-            fi
             # bionic 无独立 libpthread.so（pthread 符号在 libc），libuv 仍链 -lpthread
             # → 空 stub 兜底（NEEDED 里的 libpthread.so 由 fix_rpath.py 统一移除）
             if [ ! -e "$prefix/lib/libpthread.so" ]; then
