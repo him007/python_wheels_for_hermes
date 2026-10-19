@@ -222,6 +222,30 @@ jobs:
             BIONIC=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include)
             echo "== [inject] bionic headers from $BIONIC =="
             cp -a "$BIONIC"/. "$prefix/include/"
+            # libc++ 的 C 兼容转发头（剥掉 #include <__config>：那是 C++ 配置头，
+            # C 编译器解析不了）。bionic 头抢占 -I 首位后，libc++ 的 <cstdint>/<cstring>
+            # 找不到自己的 stdint.h 转发头 → "tried including <stdint.h> but didn't
+            # find libc++'s header"（frozenlist/greenlet/grpcio 全挂）。
+            # 转发头本体只是 include_next，剥掉 __config 后对 C/C++ 均安全。
+            CXXV1="$BIONIC/c++/v1"
+            if [ -d "$CXXV1" ]; then
+              echo "== [inject] libc++ C shims (config-stripped) from $CXXV1 =="
+              for h in stdint.h stddef.h stdlib.h string.h wchar.h wctype.h; do
+                if [ -f "$CXXV1/$h" ]; then
+                  sed -e '/#include <__config>/d' -e '/#include <__config[^>]*>/d' \
+                    "$CXXV1/$h" > "$prefix/include/$h"
+                fi
+              done
+              grep -c '__config' "$prefix/include"/stdint.h "$prefix/include"/stddef.h 2>/dev/null || true
+            fi
+            # bionic 无独立 libpthread.so（pthread 符号在 libc），libuv 仍链 -lpthread
+            # → 空 stub 兜底（NEEDED 里的 libpthread.so 由 fix_rpath.py 统一移除）
+            if [ ! -e "$prefix/lib/libpthread.so" ]; then
+              CLANG=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/clang)
+              echo 'int hermes_libpthread_stub(void){return 0;}' \
+                | "$CLANG" --target=aarch64-linux-android21 -shared -x c - -o "$prefix/lib/libpthread.so" \
+                && echo "== [inject] libpthread stub =="
+            fi
             ls "$prefix/include" | grep -E '^(assert|features|stdio|string)\.h$'
             ls "$prefix/lib/pkgconfig" | grep -E 'x265|x264|heif'
             ls "$prefix/lib" | grep -E 'ssl|crypto|python3|jpeg|tiff|openjp|heif' | head -20

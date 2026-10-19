@@ -50,6 +50,13 @@ def patch_so(patchelf: str, path: str) -> None:
     parts.insert(0, RPATH)
     new = ":".join(parts)
     subprocess.run([patchelf, "--set-rpath", new, path], check=True)
+    # 目标机 bionic 无独立 libpthread.so（pthread 符号在 libc.so），CI 里为满足
+    # libuv 的 -lpthread 链接注入了 stub；若留在 NEEDED 里，dlopen 会失败。
+    subprocess.run(
+        [patchelf, "--remove-needed", "libpthread.so", path],
+        capture_output=True,
+        text=True,
+    )
 
 
 def sha256_rec(data: bytes) -> str:
