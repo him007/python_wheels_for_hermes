@@ -27,21 +27,43 @@ jobs:
       - id: gen
         env:
           ONLY: ${{ inputs.only }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          filter=""
-          if [ -n "$ONLY" ]; then
-            filter="| select(.name == \"$ONLY\")"
+          # 已编译检查（plan 层做一次）：Release 已有的 wheel 直接从 matrix 排除。
+          # 放进 build job 会让 25 个 job 并发打 API 触发 GitHub 次级限流。
+          BUILT=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '[.[].assets[].name]' 2>/dev/null || echo "[]")
+          if m=$(jq -c --argjson built "$BUILT" --arg only "$ONLY" '
+              def norm: gsub("[-_.]+"; "_");
+              {include: [
+                .packages[]
+                | select(.enabled == true)
+                | select($only == "" or .name == $only)
+                | . as $p
+                | (($p.name | norm) + "-" + $p.version + "-") as $asset
+                | select(([$built[] | select(startswith($asset))] | length) == 0)
+                | {name: $p.name, version: $p.version, config: ($p.config_settings // "")}
+              ]}' packages.json 2>/dev/null); then
+            :
+          else
+            # Release 查询/jq 异常 → 不过滤，全部构建（宁可重复不可漏编）
+            echo "::warning::已编译过滤不可用，按全部 enabled 包构建"
+            m=$(jq -c --arg only "$ONLY" '{include: [.packages[] | select(.enabled == true) | select($only == "" or .name == $only) | {name, version, config: (.config_settings // "")}]}' packages.json)
           fi
-          m=$(jq -c "{include: [ .packages[] | select(.enabled == true) $filter | {name, version, config: (.config_settings // \"\")}]}" packages.json)
+          count=$(echo "$m" | jq '.include | length')
+          if [ "$count" = "0" ]; then
+            echo "::notice::所有 enabled 包均已在 Release 编译过，无需构建"
+            m='{"include":[{"name":"__noop__","version":"0.0.0","config":""}]}'
+          fi
           echo "matrix=$m" >> "$GITHUB_OUTPUT"
+          echo "remaining=${count}" >> "$GITHUB_OUTPUT"
+          echo "remaining=$count"
           echo "matrix: $m"
-          if [ "$m" = '{"include":[]}' ]; then
-            echo "::error::没有需要编译的包（packages.json 中 enabled=true 的条目为空）"
-            exit 1
-          fi
 
   build:
     needs: plan
+    # remaining=0（全部已编译）时整 job 跳过；matrix 占位项保证结构合法
+    if: needs.plan.outputs.remaining != '0'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -49,41 +71,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # 已编译检查：Release 里已有该包该版本的 wheel 就整 job 跳过，不重复编译
-      - name: Check already built
-        id: already
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PKG_NAME: ${{ matrix.name }}
-          PKG_VERSION: ${{ matrix.version }}
-        run: |
-          set -euo pipefail
-          # wheel 内部名：PEP 427 规范化（-. -> _），asset 形如 <norm>-<ver>-cp314-...whl
-          norm=$(python3 -c 'import re,sys;print(re.sub(r"[-_.]+","_",sys.argv[1]))' "$PKG_NAME")
-          asset="${norm}-${PKG_VERSION}-"
-          found=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100"             --jq "[.[].assets[] | select(.name | startswith("${asset}"))] | length" 2>/dev/null || echo "")
-          case "$found" in
-            ''|*[!0-9]*) echo "skip=false" >> "$GITHUB_OUTPUT"
-                        echo "::notice::Release 查询无结果(或异常)，按需编译 ${asset}*" ;;
-            0)          echo "skip=false" >> "$GITHUB_OUTPUT"
-                        echo "::notice::Release 无 ${asset}*.whl，开始编译" ;;
-            *)          echo "skip=true" >> "$GITHUB_OUTPUT"
-                        echo "::notice::Release 已有 ${asset}*.whl（${found} 个），跳过编译" ;;
-          esac
-
       - name: Install cibuildwheel
-        if: steps.already.outputs.skip != 'true'
         run: python3 -m pip install --user --disable-pip-version-check cibuildwheel
 
       - name: Add Rust android target
-        if: steps.already.outputs.skip != 'true'
         run: |
           rustup target add aarch64-linux-android
           rustc --version
           cargo --version
 
       - name: Set up Android SDK
-        if: steps.already.outputs.skip != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/android-sdk/cmdline-tools"
@@ -101,7 +98,6 @@ jobs:
       # 版本按包名从 Termux apt 索引动态解析（硬编码版本会被仓库顶掉 → 404，
       # 2026-10-19 python_3.14.6-1 即因此失效）；解析失败/缺包时回退硬编码路径。
       - name: Fetch Termux sysroot
-        if: steps.already.outputs.skip != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/tmx/x"
@@ -157,7 +153,6 @@ jobs:
           grep -h '^prefix=' "$HOME/tmx/usr"/lib/pkgconfig/openssl.pc
 
       - name: Fetch sdist
-        if: steps.already.outputs.skip != 'true'
         id: sdist
         env:
           PKG_NAME: ${{ matrix.name }}
@@ -165,7 +160,6 @@ jobs:
         run: python3 scripts/fetch_sdist.py "$PKG_NAME" "$PKG_VERSION"
 
       - name: Build android wheel
-        if: steps.already.outputs.skip != 'true'
         env:
           # sdist 解包目录名来自 PyPI 包内容（非完全受控），只允许仓库内路径
           SRC_DIR: ${{ steps.sdist.outputs.srcdir }}
@@ -227,20 +221,6 @@ jobs:
             BIONIC=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include)
             echo "== [inject] bionic headers from $BIONIC =="
             cp -a "$BIONIC"/. "$prefix/include/"
-            # libc++ 的 C 兼容头（转发头）必须覆盖 bionic 同名头：否则 -I 首位的
-            # bionic <stdlib.h> 被 libc++ 的 <cstdlib>/<cstdint> 拾到，报
-            # "tried including <stdlib.h> but didn't find libc++'s header"（greenlet/grpcio 挂）。
-            CXXV1="$BIONIC/c++/v1"
-            if [ -d "$CXXV1" ]; then
-              echo "== [inject] libc++ C shims from $CXXV1 =="
-              for h in assert ctype errno fenv float inttypes iso646 limits locale math \
-                       setjmp signal stdarg stdbool stddef stdio stdlib string strings time \
-                       wchar wctype; do
-                if [ -f "$CXXV1/$h.h" ]; then cp -f "$CXXV1/$h.h" "$prefix/include/"; fi
-              done
-              if [ -d "$CXXV1/sys" ]; then cp -rf "$CXXV1/sys" "$prefix/include/"; fi
-              ls "$prefix/include" | grep -E '^(stdlib|stdint|string|stddef)\.h$'
-            fi
             ls "$prefix/include" | grep -E '^(assert|features|stdio|string)\.h$'
             ls "$prefix/lib/pkgconfig" | grep -E 'x265|x264|heif'
             ls "$prefix/lib" | grep -E 'ssl|crypto|python3|jpeg|tiff|openjp|heif' | head -20
@@ -284,7 +264,6 @@ jobs:
           ls -la wheels/
 
       - name: Upload wheel artifact
-        if: steps.already.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.name }}
