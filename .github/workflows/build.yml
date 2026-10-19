@@ -162,16 +162,6 @@ jobs:
           PKG_VERSION: ${{ matrix.version }}
         run: python3 scripts/fetch_sdist.py "$PKG_NAME" "$PKG_VERSION"
 
-      - name: Resolve NDK libc++ include dir
-        # libc++ 的 C 兼容转发头（stdint.h 等）必须在 -I 链里排在 bionic 头
-        # （prefix/include）之前：C++ 的 <cstdint> 由此找到自己的转发头，转发头
-        # include_next 再落到 bionic 版。直接拷贝转发头到 prefix/include 会因
-        # include_next 跳到 glibc 头（-I/usr/include）而链错（intmax_t/ldiv_t 全丢）。
-        run: |
-          CXXV1=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1)
-          echo "CXXV1=$CXXV1" >> "$GITHUB_ENV"
-          ls "$CXXV1"/stdint.h "$CXXV1"/__config
-
       - name: Build android wheel
         env:
           # sdist 解包目录名来自 PyPI 包内容（非完全受控），只允许仓库内路径
@@ -197,8 +187,8 @@ jobs:
           CIBW_ENVIRONMENT: >-
             RUSTFLAGS='-L native=/home/runner/tmx/usr/lib -l dylib=python3.14 -C link-arg=-Wl,-rpath,/data/data/com.termux/files/usr/lib'
             LIBUV_CONFIGURE_HOST='aarch64-linux-android'
-            CFLAGS='-I${{ env.CXXV1 }} $CFLAGS'
-            CXXFLAGS='-I${{ env.CXXV1 }} $CXXFLAGS'
+            CFLAGS='-I$(cat /tmp/.cxxv1_path) $CFLAGS'
+            CXXFLAGS='-I$(cat /tmp/.cxxv1_path) $CXXFLAGS'
           # repair 阶段：不跑 auditwheel（其 ldpaths 只有 NDK sysroot，找不到 Termux
           # 库会 ValueError 退出）；改为统一给所有 .so 补 RUNPATH（链接期 rpath 对
           # C 扩展会丢失）并重算 RECORD，产物依赖目标机系统库（与本机验证形态一致）。
@@ -236,6 +226,15 @@ jobs:
             BIONIC=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include)
             echo "== [inject] bionic headers from $BIONIC =="
             cp -a "$BIONIC"/. "$prefix/include/"
+            # libc++ 的 C 兼容转发头（stdint.h 等）必须在 -I 链里排在 bionic 头
+            # （prefix/include）之前：C++ 的 <cstdint> 由此找到自己的转发头，转发头
+            # include_next 再落到 bionic 版。直接拷贝转发头到 prefix/include 会因
+            # include_next 跳到 glibc 头（-I/usr/include）而链错（intmax_t/ldiv_t 全丢）。
+            # 解析出的路径写文件，CIBW_ENVIRONMENT 的 CFLAGS/CXXFLAGS 用 $(cat) 展开。
+            CXXV1=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1)
+            echo "$CXXV1" > /tmp/.cxxv1_path
+            echo "== [inject] libc++ headers from $CXXV1 =="
+            ls "$CXXV1"/stdint.h "$CXXV1"/__config
             # bionic 无独立 libpthread.so（pthread 符号在 libc），libuv 仍链 -lpthread
             # → 空 stub 兜底（NEEDED 里的 libpthread.so 由 fix_rpath.py 统一移除）
             if [ ! -e "$prefix/lib/libpthread.so" ]; then
