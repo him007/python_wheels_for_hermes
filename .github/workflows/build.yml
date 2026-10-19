@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
+      remaining: ${{ steps.gen.outputs.remaining }}
     steps:
       - uses: actions/checkout@v5
       - id: gen
