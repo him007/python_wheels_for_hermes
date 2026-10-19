@@ -1,0 +1,305 @@
+name: build-android-wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "只编译指定包名（留空 = packages.json 里所有 enabled 的包）"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "packages.json"
+      - ".github/workflows/build.yml"
+      - "scripts/**"
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: gen
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          filter=""
+          if [ -n "$ONLY" ]; then
+            filter="| select(.name == \"$ONLY\")"
+          fi
+          m=$(jq -c "{include: [ .packages[] | select(.enabled == true) $filter | {name, version, config: (.config_settings // \"\")}]}" packages.json)
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+          echo "matrix: $m"
+          if [ "$m" = '{"include":[]}' ]; then
+            echo "::error::没有需要编译的包（packages.json 中 enabled=true 的条目为空）"
+            exit 1
+          fi
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install cibuildwheel
+        run: python3 -m pip install --user --disable-pip-version-check cibuildwheel
+
+      - name: Add Rust android target
+        run: |
+          rustup target add aarch64-linux-android
+          rustc --version
+          cargo --version
+
+      - name: Set up Android SDK
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$HOME/android-sdk/cmdline-tools"
+          mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" "$HOME/android-sdk/cmdline-tools/latest"
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> "$GITHUB_ENV"
+          yes | "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+      # Termux sysroot：提供与目标机完全一致的 libs/headers/pkg-config。
+      # - python/openssl → cryptography 及所有包的 libpython3.14.so + libssl.so.3
+      # - jpeg/tiff/openjpeg/zlib → pillow 的图像依赖
+      # - libheif/de265/x265/libaom/x264 → pillow-heif
+      # 版本按包名从 Termux apt 索引动态解析（硬编码版本会被仓库顶掉 → 404，
+      # 2026-10-19 python_3.14.6-1 即因此失效）；解析失败/缺包时回退硬编码路径。
+      - name: Fetch Termux sysroot
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/tmx/x"
+          BASE=https://packages.termux.dev/apt/termux-main
+          PKGS="python openssl libjpeg-turbo libtiff openjpeg zlib libheif libde265 x265 libaom x264 libx265 libx264"
+          PATHS=$(python3 - "$BASE" $PKGS <<'PY'
+          import gzip, re, sys, urllib.parse, urllib.request
+          base, pkgs = sys.argv[1], sys.argv[2:]
+          idx = base + "/dists/stable/main/binary-aarch64/Packages.gz"
+          data = gzip.decompress(urllib.request.urlopen(idx, timeout=60).read()).decode("utf-8", "replace")
+          found = {}
+          for blk in data.split("\n\n"):
+              m = re.search(r"^Package: (\S+)$", blk, re.M)
+              fn = re.search(r"^Filename: (\S+)$", blk, re.M)
+              if m and fn and m.group(1) in pkgs:
+                  found[m.group(1)] = fn.group(1)  # 多条目保留最后一条（索引升序=最新）
+          missing = [p for p in pkgs if p not in found]
+          if missing:
+              sys.stderr.write("apt index missing: %s\n" % missing)
+              sys.exit(1)
+          print("\n".join(urllib.parse.quote(found[p], safe="/") for p in pkgs))
+          PY
+          ) || PATHS=""
+          if [ -z "$PATHS" ]; then
+            echo "::warning::apt index resolve failed, using fallback paths"
+            PATHS="
+          pool/main/p/python/python_3.14.8_aarch64.deb
+          pool/main/o/openssl/openssl_1%3A3.6.5_aarch64.deb
+          pool/main/libj/libjpeg-turbo/libjpeg-turbo_3.2.0_aarch64.deb
+          pool/main/libt/libtiff/libtiff_4.7.2_aarch64.deb
+          pool/main/o/openjpeg/openjpeg_2.5.4_aarch64.deb
+          pool/main/z/zlib/zlib_1.3.2_aarch64.deb
+          pool/main/libh/libheif/libheif_1.23.6_aarch64.deb
+          pool/main/libd/libde265/libde265_1.1.3_aarch64.deb
+          pool/main/x/x265/x265_4.3_aarch64.deb
+          pool/main/liba/libaom/libaom_3.15.2_aarch64.deb
+          pool/main/x/x264/x264_1%3A0.164.3191-1_aarch64.deb
+          pool/main/libx/libx265/libx265_4.3_aarch64.deb
+          pool/main/libx/libx264/libx264_1%3A0.164.3191-1_aarch64.deb
+          "
+          fi
+          for path in $PATHS
+          do
+            echo "fetch $path"
+            curl -fsSL --retry 3 -o "/tmp/pkg.deb" "$BASE/$path"
+            dpkg-deb -x /tmp/pkg.deb "$HOME/tmx/x"
+          done
+          mv "$HOME/tmx/x/data/data/com.termux/files/usr" "$HOME/tmx/usr"
+          # .pc 内 prefix 硬编码 /data/data/com.termux/files/usr（目标机路径），改到解压位置供链接期用
+          sed -i "s|^prefix=.*|prefix=/home/runner/tmx/usr|" "$HOME/tmx/usr"/lib/pkgconfig/*.pc
+          echo "== sysroot ready =="
+          ls "$HOME/tmx/usr/lib" | grep -E '^(libpython3|libssl|libjpeg|libtiff|libopenjp2|libz\.|libheif|libde265|libx265|libaom|libx264)' | head -30
+          grep -h '^prefix=' "$HOME/tmx/usr"/lib/pkgconfig/openssl.pc
+
+      - name: Fetch sdist
+        id: sdist
+        env:
+          PKG_NAME: ${{ matrix.name }}
+          PKG_VERSION: ${{ matrix.version }}
+        run: python3 scripts/fetch_sdist.py "$PKG_NAME" "$PKG_VERSION"
+
+      - name: Build android wheel
+        env:
+          # sdist 解包目录名来自 PyPI 包内容（非完全受控），只允许仓库内路径
+          SRC_DIR: ${{ steps.sdist.outputs.srcdir }}
+          CIBW_PLATFORM: android
+          CIBW_ARCHS: arm64_v8a
+          CIBW_BUILD: cp314-android_arm64_v8a
+          CIBW_BUILD_FRONTEND: build
+          CIBW_OUTPUT_DIR: wheels
+          CIBW_VERBOSITY: "1"
+          # 覆盖 sdist 自带的 [tool.cibuildwheel]（pillow 的 before-all 指向其仓库
+          # CI 脚本 wheels-dependencies.sh，sdist 内不存在 → 127；test-command 同理，
+          # 且 android 无模拟器/无法跑测试）
+          CIBW_BEFORE_ALL: ""
+          CIBW_TEST_COMMAND: ""
+          # per-package config-settings（plan 生成，空串 = 不传）
+          CIBW_CONFIG_SETTINGS: ${{ matrix.config }}
+          # 强制链接 Termux libpython + 写入目标机 rpath：
+          # -l dylib=python3.14 → 产物 NEEDED libpython3.14.so（否则 PyExc_* 等符号解析失败）
+          # -rpath=/data/data/com.termux/files/usr/lib → Termux 上按该固定路径找到系统库
+          # 注：若 cargo config 定义了 target.<triple>.rustflags，RUSTFLAGS 会被忽略，
+          #     产出后由 readelf 校验 NEEDED/RUNPATH 兜底。
+          CIBW_ENVIRONMENT: >-
+            RUSTFLAGS='-L native=/home/runner/tmx/usr/lib -l dylib=python3.14 -C link-arg=-Wl,-rpath,/data/data/com.termux/files/usr/lib'
+          # repair 阶段：不跑 auditwheel（其 ldpaths 只有 NDK sysroot，找不到 Termux
+          # 库会 ValueError 退出）；改为统一给所有 .so 补 RUNPATH（链接期 rpath 对
+          # C 扩展会丢失）并重算 RECORD，产物依赖目标机系统库（与本机验证形态一致）。
+          CIBW_REPAIR_WHEEL_COMMAND: "python3 {project}/scripts/fix_rpath.py {wheel} {dest_dir}"
+          # 根因：maturin 生成的 PYO3_CONFIG_FILE 报告的 include 是 prefix/include，
+          # 而 Python.h 实际在 prefix/include/python3.14/，导致 cryptography-cffi 的
+          # build.rs 编 _openssl.c 时报 'Python.h' file not found。
+          # 修法：build 前把 Python.h 同目录的头文件符号链接进两个实际被 -I 的目录。
+          # 注意：cibuildwheel 用 /bin/sh (dash) 执行 BEFORE_BUILD，
+          # dash 不支持 `set -o pipefail`，写了会直接退出 (Illegal option)。
+          CIBW_BEFORE_BUILD: |
+            set -u
+            # 注入 Termux sysroot：openssl libs/headers/pc + libpython 全部换成目标机同款，
+            # 使 pkg-config/headers/链接库三者一致（3.6.5），并让 pyo3 检测到 libpython。
+            SYSROOT=/home/runner/tmx/usr
+            prefix=$(echo /tmp/cibw-run-*/cp314-android_arm64_v8a/python/prefix)
+            echo "== [inject] sysroot into $prefix =="
+            ls -l "$SYSROOT/lib/libpython3.14.so" "$SYSROOT/lib/libssl.so.3" "$SYSROOT/lib/libcrypto.so.3"
+            # libs：全部注入（保留符号链接），含 pillow/pillow-heif 的图像库
+            cp -a "$SYSROOT"/lib/*.so* "$prefix/lib/"
+            # headers：根 .h（zlib/jpeg/tiff/openjpeg 等）+ 指定子目录；跳过 python3.14（用 pbs 自带）
+            cp -P "$SYSROOT"/include/*.h "$prefix/include/"
+            for d in openssl jpeg tiff openjpeg libheif x265 libde265 aom; do
+              if [ -d "$SYSROOT/include/$d" ]; then
+                rm -rf "$prefix/include/$d"
+                cp -r "$SYSROOT/include/$d" "$prefix/include/"
+              fi
+            done
+            # pkg-config：全量覆盖（PKG_CONFIG_LIBDIR 只认 prefix/lib/pkgconfig）
+            cp -f "$SYSROOT"/lib/pkgconfig/*.pc "$prefix/lib/pkgconfig/"
+            # bionic 头文件树 → prefix/include（-I 首位）：
+            # pillow/pillow-heif 的 setup.py 硬编码 -I/usr/local/include -I/usr/include
+            # （runner 的 glibc 头），glibc features-time64.h 要求 NDK 没有的
+            # bits/wordsize.h → fatal error。bionic 头在 -I 首位抢先命中即解决。
+            BIONIC=$(echo "${ANDROID_HOME:-/home/runner/android-sdk}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include)
+            echo "== [inject] bionic headers from $BIONIC =="
+            cp -a "$BIONIC"/. "$prefix/include/"
+            ls "$prefix/include" | grep -E '^(assert|features|stdio|string)\.h$'
+            ls "$prefix/lib/pkgconfig" | grep -E 'x265|x264|heif'
+            ls "$prefix/lib" | grep -E 'ssl|crypto|python3|jpeg|tiff|openjp|heif' | head -20
+            pkg-config --modversion openssl libheif libjpeg x265 2>&1 | head -10 || true
+            # C 扩展链接参数：sysconfig LDSHARED 注入 libpython + 目标机 rpath
+            python3 {project}/scripts/patch_sysconfig.py "$prefix"
+            echo "== [inject] done =="
+            echo "== [diag] link env =="
+            (env | grep -E '^(LDSHARED|LDFLAGS|RUSTFLAGS|CFLAGS)=' | sort || true)
+            echo "== [diag] locate Python.h =="
+            find /tmp/cibw-run-*/cp314-android_arm64_v8a/python -name Python.h -print 2>/dev/null || true
+            echo "== [diag] python tree (depth 4) =="
+            find /tmp/cibw-run-*/cp314-android_arm64_v8a/python -maxdepth 4 -type d -print 2>/dev/null | head -60 || true
+            echo "== [diag] build env =="
+            (env | grep -E '^(CFLAGS|CC=|PYO3|MATURIN|CARGO|ANDROID)' | sort || true)
+
+            hdr_dirs=$(find /tmp/cibw-run-*/cp314-android_arm64_v8a/python -name Python.h -printf '%h\n' 2>/dev/null || true)
+            echo "== [fix] Python.h dirs: [$hdr_dirs] =="
+
+            for inc in /tmp/cibw-run-*/cp314-android_arm64_v8a/python/prefix/include /tmp/cibw-run-*/cp314-android_arm64_v8a/python/include/lib; do
+              if [ ! -d "$inc" ]; then echo "[fix] skip missing dir $inc"; continue; fi
+              for hdr_dir in $hdr_dirs; do
+                if [ "$hdr_dir" = "$inc" ]; then continue; fi
+                for f in "$hdr_dir"/*; do
+                  if [ ! -e "$f" ]; then continue; fi
+                  base=$(basename "$f")
+                  if [ -e "$inc/$base" ]; then continue; fi
+                  if ln -s "$f" "$inc/$base"; then echo "[fix] linked $inc/$base -> $f"; fi
+                done
+              done
+              echo "== [fix] $inc after linking =="
+              ls -la "$inc" | head -40 || true
+            done
+            echo "== [fix] before_build done =="
+        run: |
+          case "$SRC_DIR" in
+            "$PWD"/src/*) : ;;
+            *) echo "::error::非法 sdist 解包路径: $SRC_DIR"; exit 1 ;;
+          esac
+          cibuildwheel --platform android "$SRC_DIR"
+          ls -la wheels/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: wheels/*.whl
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    # 单个包失败不阻塞其余包的发布（download-artifact 只拿已成功上传的 artifact）
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Show produced wheels
+        run: ls -la dist/
+
+      - name: Upload wheels to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          uploaded=0
+          for whl in dist/*.whl; do
+            base=$(basename "$whl")
+            pkg=$(python3 -c "import sys;print(sys.argv[1].split('-')[0])" "$base")
+            tag="wheels-${pkg}"
+            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                --title "$tag" \
+                --notes "Termux/Android aarch64 wheels for ${pkg}, built by GitHub Actions (cibuildwheel)." \
+                --latest=false
+            fi
+            gh release upload "$tag" "$whl" --repo "$GITHUB_REPOSITORY" --clobber
+            uploaded=$((uploaded+1))
+          done
+          echo "uploaded $uploaded wheel(s)"
+
+      # 发布后重建本 fork 的 simple/pypi 索引并回推（wheels/** 不在 workflow
+      # paths 触发器内，不会引发布置死循环；GITHUB_TOKEN 的 push 也不触发 workflow）
+      - name: Rebuild index and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 scripts/generate_index.py
+          git add wheels/simple wheels/pypi
+          if git diff --cached --quiet; then
+            echo "index unchanged"
+            exit 0
+          fi
+          git commit -m "chore(index): rebuild simple/pypi index after $GITHUB_SHA"
+          git push origin main

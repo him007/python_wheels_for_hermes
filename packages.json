@@ -1,0 +1,63 @@
+{
+  "python": "cp314",
+  "arch": "arm64_v8a",
+  "android_api": 24,
+  "packages": [
+    {
+      "name": "cryptography",
+      "version": "50.0.1",
+      "enabled": true,
+      "kind": "Rust (setuptools-rust)",
+      "note": "默认 features = aws-lc-rs，需 cmake + NDK C 编译器"
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.46.4",
+      "enabled": true,
+      "kind": "Rust (maturin>=1.11)"
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0",
+      "enabled": true,
+      "kind": "C",
+      "config_settings": "imagequant=disable raqm=disable"
+    },
+    {
+      "name": "pillow-heif",
+      "version": "1.7.0",
+      "enabled": true,
+      "kind": "C (需交叉编译 libheif)"
+    },
+    {
+      "name": "ruamel.yaml.clib",
+      "version": "0.2.15",
+      "enabled": true,
+      "kind": "C"
+    },
+    {
+      "name": "httptools",
+      "version": "0.8.0",
+      "enabled": true,
+      "kind": "C"
+    },
+    {
+      "name": "watchfiles",
+      "version": "1.2.0",
+      "enabled": true,
+      "kind": "Rust (maturin)"
+    },
+    {
+      "name": "resvg-py",
+      "version": "0.4.0",
+      "enabled": true,
+      "kind": "Rust (maturin)"
+    },
+    {
+      "name": "firecrawl-anydoc",
+      "version": "0.2.4",
+      "enabled": true,
+      "kind": "含原生 .so"
+    }
+  ]
+}

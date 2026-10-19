@@ -1,0 +1,24 @@
+{
+ "info": {
+  "name": "httptools",
+  "version": "0.8.0",
+  "requires_dist": null,
+  "requires_python": null,
+  "platform": "UNKNOWN",
+  "summary": null,
+  "yanked": false,
+  "yanked_reason": null
+ },
+ "releases": {
+  "0.8.0": [
+   {
+    "filename": "httptools-0.8.0-cp314-cp314-android_24_arm64_v8a.whl",
+    "url": "https://github.com/him007/python_wheels_for_hermes/releases/download/wheels-httptools/httptools-0.8.0-cp314-cp314-android_24_arm64_v8a.whl",
+    "requires_python": null,
+    "packagetype": "bdist_wheel",
+    "yanked": false,
+    "yanked_reason": null
+   }
+  ]
+ }
+}
