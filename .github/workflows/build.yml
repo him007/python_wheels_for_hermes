@@ -80,7 +80,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/tmx/x"
           BASE=https://packages.termux.dev/apt/termux-main
-          PKGS="python openssl libjpeg-turbo libtiff openjpeg zlib libheif libde265 x265 libaom x264 libx265 libx264"
+          PKGS="python openssl libjpeg-turbo libtiff openjpeg zlib libheif libde265 x265 libaom x264 libx265 libx264 libffi libuv"
           PATHS=$(python3 - "$BASE" $PKGS <<'PY'
           import gzip, re, sys, urllib.parse, urllib.request
           base, pkgs = sys.argv[1], sys.argv[2:]
@@ -183,7 +183,7 @@ jobs:
             cp -a "$SYSROOT"/lib/*.so* "$prefix/lib/"
             # headers：根 .h（zlib/jpeg/tiff/openjpeg 等）+ 指定子目录；跳过 python3.14（用 pbs 自带）
             cp -P "$SYSROOT"/include/*.h "$prefix/include/"
-            for d in openssl jpeg tiff openjpeg libheif x265 libde265 aom; do
+            for d in openssl jpeg tiff openjpeg libheif x265 libde265 aom ffi uv; do
               if [ -d "$SYSROOT/include/$d" ]; then
                 rm -rf "$prefix/include/$d"
                 cp -r "$SYSROOT/include/$d" "$prefix/include/"

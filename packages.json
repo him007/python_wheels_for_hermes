@@ -2,6 +2,7 @@
   "python": "cp314",
   "arch": "arm64_v8a",
   "android_api": 24,
+  "_comment": "版本依据 ~/.hermes/hermes-agent/uv.lock（2026-10-19 校验）；系统软链包（cryptography/numpy/grpcio 的 pkg 分支）不受此文件管辖",
   "packages": [
     {
       "name": "cryptography",
@@ -58,6 +59,119 @@
       "version": "0.2.4",
       "enabled": true,
       "kind": "含原生 .so"
+    },
+    {
+      "name": "psutil",
+      "version": "7.2.2",
+      "enabled": true,
+      "kind": "C",
+      "note": "核心依赖：lock 的 android 分支是未发布 git 8.0.0，CI 取 PyPI 用 registry 条目 7.2.2"
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖（PyNaCl/cryptography 链）；需 sysroot libffi"
+    },
+    {
+      "name": "markupsafe",
+      "version": "3.0.3",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖：jinja2"
+    },
+    {
+      "name": "greenlet",
+      "version": "3.5.5",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖"
+    },
+    {
+      "name": "multidict",
+      "version": "6.9.1",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖：aiohttp；官方 android wheel 仅 x86_64，无 arm64"
+    },
+    {
+      "name": "yarl",
+      "version": "1.24.5",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖：aiohttp；官方无 android wheel"
+    },
+    {
+      "name": "frozenlist",
+      "version": "1.8.0",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖：aiohttp；官方无 android wheel"
+    },
+    {
+      "name": "tornado",
+      "version": "6.5.10",
+      "enabled": true,
+      "kind": "C",
+      "note": "安全修复版本（GHSA-c2m8-h5v5-343r）"
+    },
+    {
+      "name": "jiter",
+      "version": "0.16.0",
+      "enabled": true,
+      "kind": "Rust (maturin)",
+      "note": "传递依赖：openai"
+    },
+    {
+      "name": "obstore",
+      "version": "0.8.2",
+      "enabled": true,
+      "kind": "Rust (maturin)",
+      "note": "传递依赖"
+    },
+    {
+      "name": "rpds-py",
+      "version": "2026.6.3",
+      "enabled": true,
+      "kind": "Rust (maturin)",
+      "note": "传递依赖：jsonschema"
+    },
+    {
+      "name": "cbor2",
+      "version": "6.1.4",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖"
+    },
+    {
+      "name": "pycryptodome",
+      "version": "3.23.0",
+      "enabled": true,
+      "kind": "C",
+      "note": "传递依赖"
+    },
+    {
+      "name": "numpy",
+      "version": "2.4.3",
+      "enabled": true,
+      "kind": "C (meson-python)",
+      "config_settings": "setup-args=-Dallow-noblas=true",
+      "note": "extras voice/wake/audio-io；无 BLAS 构建（android 无可用 BLAS）"
+    },
+    {
+      "name": "grpcio",
+      "version": "1.83.0",
+      "enabled": true,
+      "kind": "C++ (gRPC)",
+      "note": "extras google-chat；编译耗时长"
+    },
+    {
+      "name": "uvloop",
+      "version": "0.22.1",
+      "enabled": true,
+      "kind": "C (libuv)",
+      "note": "extra uvloop；需 sysroot libuv"
     }
   ]
 }
